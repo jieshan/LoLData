@@ -10,23 +10,26 @@ namespace LoLData.DataCollection
     {
         public static string[] serverList = {"NA"};
 
-        public static string apiKey = "xxx";
+        public static string apiKey;
+
+        public static string apiKeyPath = "PrivateData\\ApiKey.txt";
 
         public static void Main() 
         {
+            apiKey = apiKey == null ? new FileManager(DataCollection.apiKeyPath).readOneLine() : apiKey;
+
             System.Diagnostics.Debug.WriteLine("============================");
             System.Diagnostics.Debug.WriteLine("Data Collection Starts");
 
             for (int i = 0; i < DataCollection.serverList.Length; i++ )
             {
                 // TODO: Query servers asynchronously
-                QueryManager queryManager = new QueryManager(serverList[0], DataCollection.apiKey);
-                queryManager.initiateSeedScan();
-                System.Diagnostics.Debug.WriteLine("****************");
-                System.Diagnostics.Debug.WriteLine(queryManager.getTotalPlayersCount());
+                ServerManager queryManager = new ServerManager(serverList[0], DataCollection.apiKey);
+                queryManager.initiateNewSeedScan();
+                queryManager.processAllPlayers();
             }
 
             System.Diagnostics.Debug.WriteLine("============================");
-        }    
+        }
     }
 }
