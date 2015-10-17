@@ -5,14 +5,27 @@ using System.Text;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using System.Net.Http;
+using LoLData.DataCollection;
 
 namespace LoLData
 {
     public class ServerManager
     {
-        private static int cooldownInterval = 120000;
+        private static int rateLimitBuffer = 1000;
 
-        private static int maxProcessQueueWaits = 1; 
+        private static int cooldownInterval = 5000;
+
+        private static int maxProcessQueueWaits = 12;
+
+        private static Object haltQueryLock = new Object();
+
+        private static Object retryAfterLock = new Object();
+
+        private static string logFilePathSuffix = "log.txt";
+
+        private static string playersFilePathSuffix = "players.txt";
+
+        private static string gamesFilePathSuffix = "games.txt";
 
         private static string gameType = "RANKED_SOLO_5x5";
 
@@ -43,6 +56,16 @@ namespace LoLData
 
         private string apiKey;
 
+        private bool haltQuery;
+
+        private int retryAfter;
+
+        private FileManager logFile;
+
+        private FileManager playersFile;
+
+        private FileManager gamesFile;
+
         public ServerManager(string serverName, string apiKey) 
         {
             this.server = serverName;
@@ -52,6 +75,9 @@ namespace LoLData
             this.playersUnderProcess = new Dictionary<string, int>();
             this.playersProcessed = new Dictionary<string, int>();
             this.gamesProcessed = new Dictionary<string, int>();
+            this.logFile = new FileManager(this.server + ServerManager.logFilePathSuffix);
+            this.playersFile = new FileManager(this.server + ServerManager.playersFilePathSuffix);
+            this.gamesFile = new FileManager(this.server + ServerManager.gamesFilePathSuffix);
         }
 
         public void initiateNewSeedScan()
@@ -74,6 +100,15 @@ namespace LoLData
                     if (validatePlayer(playerId, tier)) 
                     {
                         playersToProcess.Add(playerId, 1);
+                        lock (this.playersFile) 
+                        {
+                            this.playersFile.writeLine(playerId);
+                        }
+                        lock (this.logFile)
+                        {
+                            this.logFile.writeLine(String.Format("{0} {1} ======== Player Qualified for Process: {2} (Seed Scan)", DateTime.Now.ToLongTimeString(),
+                                DateTime.Now.ToLongDateString(), playerId));
+                        }                       
                     }
                 }
             }          
@@ -88,6 +123,7 @@ namespace LoLData
             int remainingPlayers = this.playersToProcess.Keys.Count;
             while (remainingPlayers > 0)
             {
+                // TODO: Make the call async as well
                 this.processNextPlayer();
                 remainingWaits = ServerManager.maxProcessQueueWaits;
             }
@@ -108,6 +144,7 @@ namespace LoLData
 
         public int getTotalPlayersCount()
         {
+            // Only an approximate, yielding access to data processing work
             return this.playersToProcess.Keys.Count + 
                 this.playersUnderProcess.Keys.Count + 
                 this.playersProcessed.Keys.Count;
@@ -115,7 +152,15 @@ namespace LoLData
 
         public int getTotalGamesCount()
         {
+            // Only an approximate, yielding access to data processing work
             return this.gamesProcessed.Keys.Count;
+        }
+
+        public void closeAllFiles() 
+        {
+            this.logFile.writerClose();
+            this.playersFile.writerClose();
+            this.gamesFile.writerClose();
         }
 
         private void processNextPlayer() 
@@ -156,6 +201,8 @@ namespace LoLData
             {
                 System.Diagnostics.Debug.WriteLine(String.Format("===== {0} server now has processed {1} players.", 
                     this.server, playerCount));
+                System.Diagnostics.Debug.WriteLine(String.Format("===== {0} server now has processed {1} games.",
+                    this.server, this.getTotalGamesCount()));
             }
         }
 
@@ -181,12 +228,22 @@ namespace LoLData
                     JArray queues = (JArray)summoner[summonerId];
                     for (int j = 0; j < queues.Count; j++)
                     {
+                        string tier = (string)((JObject)queues[j])["tier"];
                         if (((string)((JObject)queues[j])["queue"]).Equals(ServerManager.gameType)
-                                && this.validatePlayer(summonerId, (string)((JObject)queues[j])["tier"]))
+                                && this.validatePlayer(summonerId, tier))
                         {
                             lock (this.playersToProcess)
                             {
                                 this.playersToProcess.Add(summonerId, 1);
+                                lock (this.playersFile)
+                                {
+                                    this.playersFile.writeLine(summonerId);
+                                }
+                                lock (this.logFile) 
+                                {
+                                    this.logFile.writeLine(String.Format("{0} {1} ======== Player Qualified for Process: {2} ({3})", DateTime.Now.ToLongTimeString(),
+                                        DateTime.Now.ToLongDateString(), summonerId, tier));
+                                }                              
                             }
                             break;
                         }
@@ -197,24 +254,69 @@ namespace LoLData
 
         private void registerGame(JObject game)
         {
-            // TODO: Implementation
+            // TODO: Game analysis implementation
+            lock (this.gamesProcessed)
+            {
+                string gameId = (string)game["gameId"];
+                if (!this.gamesProcessed.ContainsKey(gameId))
+                {
+                    this.gamesProcessed.Add((string)game["gameId"], 1);
+                    lock (this.gamesFile)
+                    {
+                        this.gamesFile.writeLine(gameId);
+                    }
+                    lock (this.logFile)
+                    {
+                        this.logFile.writeLine(String.Format("{0} {1} ======== Game Registered {2}", DateTime.Now.ToLongTimeString(),
+                            DateTime.Now.ToLongDateString(), gameId));
+                    }
+                }               
+            }
         }
 
         private JObject makeQuery(string queryString)
         {
             JObject result = null;
-            var httpResponse = httpClient.GetAsync(queryString).Result;
-            int statusCode = (int) httpResponse.StatusCode;
-            while (statusCode == 429)
+            if (!haltQuery)
             {
-                System.Threading.Thread.Sleep(ServerManager.cooldownInterval);
-                httpResponse = httpClient.GetAsync(queryString).Result;
-                statusCode = (int)httpResponse.StatusCode;
+                var httpResponse = httpClient.GetAsync(queryString).Result;
+                int statusCode = (int)httpResponse.StatusCode;
+                System.Diagnostics.Debug.WriteLine(String.Format("==== Query: {0} {1}",
+                        statusCode, queryString));
+                lock (this.logFile)
+                {
+                    this.logFile.writeLine(String.Format("{0} {1} == Query: {2} {3}", DateTime.Now.ToLongTimeString(),
+                        DateTime.Now.ToLongDateString(), statusCode, queryString));
+                }          
+                if (statusCode == 429)
+                {
+                    lock (ServerManager.haltQueryLock) 
+                    {
+                        this.haltQuery = true;
+                    }
+                    lock (ServerManager.retryAfterLock) 
+                    {
+                        this.retryAfter = int.Parse(httpResponse.Headers.GetValues("Retry-After").FirstOrDefault()) * 1000;
+                    }
+                    System.Diagnostics.Debug.WriteLine(String.Format("== Rate Limit hit. Retry after {0} milliseconds. Query: {1}",
+                        this.retryAfter, queryString));
+                    System.Threading.Thread.Sleep(ServerManager.rateLimitBuffer + this.retryAfter);
+                    lock (ServerManager.haltQueryLock)
+                    {
+                        this.haltQuery = false;
+                    }
+                    makeQuery(queryString);
+                }
+                if (statusCode == 200)
+                {
+                    string json = httpResponse.Content.ReadAsStringAsync().Result;
+                    result = JObject.Parse(json);
+                }
             }
-            if (statusCode == 200) 
+            else 
             {
-                string json = httpResponse.Content.ReadAsStringAsync().Result;
-                result = JObject.Parse(json);
+                System.Threading.Thread.Sleep(ServerManager.rateLimitBuffer + this.retryAfter);
+                makeQuery(queryString);
             }
             return result;
         }

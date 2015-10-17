@@ -25,8 +25,17 @@ namespace LoLData.DataCollection
             {
                 // TODO: Query servers asynchronously
                 ServerManager queryManager = new ServerManager(serverList[0], DataCollection.apiKey);
-                queryManager.initiateNewSeedScan();
-                queryManager.processAllPlayers();
+                try
+                {
+                    queryManager.initiateNewSeedScan();
+                    queryManager.processAllPlayers();
+                }
+                finally
+                {
+                    queryManager.closeAllFiles();
+                    System.Diagnostics.Debug.WriteLine("****************");
+                    System.Diagnostics.Debug.WriteLine(String.Format("Error in collecting {0} server.", serverList[0]));
+                }              
             }
 
             System.Diagnostics.Debug.WriteLine("============================");
