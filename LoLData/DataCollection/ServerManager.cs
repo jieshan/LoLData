@@ -10,9 +10,9 @@ namespace LoLData
 {
     public class ServerManager
     {
-        private static int cooldownInterval = 5000;
+        private static int cooldownInterval = 120000;
 
-        private static int maxProcessQueueWaits = 12; 
+        private static int maxProcessQueueWaits = 1; 
 
         private static string gameType = "RANKED_SOLO_5x5";
 
@@ -31,6 +31,8 @@ namespace LoLData
 
         private Dictionary<string, int> playersToProcess;
 
+        private Dictionary<string, int> playersUnderProcess;
+
         private Dictionary<string, int> playersProcessed;
 
         private Dictionary<string, int> gamesProcessed;
@@ -41,14 +43,13 @@ namespace LoLData
 
         private string apiKey;
 
-        private bool allPlayersProcessed;
-
         public ServerManager(string serverName, string apiKey) 
         {
             this.server = serverName;
             this.apiKey = apiKey;
             this.httpClient = new HttpClient();
             this.playersToProcess = new Dictionary<string, int>();
+            this.playersUnderProcess = new Dictionary<string, int>();
             this.playersProcessed = new Dictionary<string, int>();
             this.gamesProcessed = new Dictionary<string, int>();
         }
@@ -98,6 +99,8 @@ namespace LoLData
             {
                 System.Diagnostics.Debug.WriteLine("****************");
                 System.Diagnostics.Debug.WriteLine(this.getTotalPlayersCount());
+                System.Diagnostics.Debug.WriteLine("****************");
+                System.Diagnostics.Debug.WriteLine(this.getTotalGamesCount());
                 return true;
             }
             return this.processAllPlayers(remainingWaits);
@@ -105,7 +108,9 @@ namespace LoLData
 
         public int getTotalPlayersCount()
         {
-            return this.playersToProcess.Keys.Count + this.playersProcessed.Keys.Count;
+            return this.playersToProcess.Keys.Count + 
+                this.playersUnderProcess.Keys.Count + 
+                this.playersProcessed.Keys.Count;
         }
 
         public int getTotalGamesCount()
@@ -116,10 +121,11 @@ namespace LoLData
         private void processNextPlayer() 
         {
             string playerId;
-            lock (this.playersToProcess)
+            lock (this.playersToProcess) lock (this.playersUnderProcess)
             {
                 playerId = this.playersToProcess.Keys.ElementAt(0);
-                this.playersToProcess.Remove(playerId); 
+                this.playersToProcess.Remove(playerId);
+                this.playersUnderProcess.Add(playerId, 1); 
             }            
             string queryString = String.Format(ServerManager.gamesQueryTemplate, this.server.ToLower(), 
                 this.server.ToLower(), playerId, this.apiKey);
@@ -138,8 +144,9 @@ namespace LoLData
 
             // TODO: Write playerId to cache
             int playerCount;
-            lock (this.playersProcessed)
+            lock (this.playersUnderProcess) lock (this.playersProcessed)
             {
+                this.playersUnderProcess.Remove(playerId);
                 this.playersProcessed.Add(playerId, 1);
             }
             System.Diagnostics.Debug.WriteLine(String.Format("========= Player {0} processed. Remaining {1} players.",
@@ -159,6 +166,10 @@ namespace LoLData
                 registerGame(game);
             }
             JArray fellowPlayers = (JArray) game["fellowPlayers"];
+            if(fellowPlayers == null)
+            {
+                return;
+            }
             for (int i = 0; i < fellowPlayers.Count; i++ )
             {
                 string summonerId = (string) ((JObject) fellowPlayers[i])["summonerId"];
@@ -210,10 +221,10 @@ namespace LoLData
 
         private bool validatePlayer(string playerId, string tier) 
         {
-            lock (this.playersToProcess) lock (this.playersProcessed)
+            lock (this.playersToProcess) lock (this.playersUnderProcess) lock (this.playersProcessed)
             {
-                return !playersProcessed.ContainsKey(playerId) && !playersToProcess.ContainsKey(playerId)
-                    && qualifiedLeagues.Contains(tier.ToUpper()) ? true : false;
+                return !this.playersToProcess.ContainsKey(playerId) && !this.playersUnderProcess.ContainsKey(playerId)
+                    && !this.playersProcessed.ContainsKey(playerId) && qualifiedLeagues.Contains(tier.ToUpper()) ? true : false;
             }
         }
     }
