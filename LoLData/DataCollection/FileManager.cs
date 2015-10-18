@@ -66,5 +66,13 @@ namespace LoLData.DataCollection
                 this.writer.Close();
             }
         }
+
+        public void writerFlush()
+        {
+            if (this.writer != null)
+            {
+                this.writer.Flush();
+            }
+        }
     }
 }

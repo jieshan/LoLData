@@ -38,6 +38,7 @@
   <ItemGroup>
     <Compile Include="DataCollection\DataCollection.cs" />
     <Compile Include="DataCollection\FileManager.cs" />
+    <Compile Include="DataCollection\QueryManager.cs" />
     <Compile Include="DataCollection\ServerManager.cs" />
   </ItemGroup>
   <ItemGroup>
