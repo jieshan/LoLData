@@ -28,6 +28,8 @@ namespace LoLData
 
         private static string[] qualifiedLeagues = { "CHALLENGER", "MASTER", "DIAMOND", "PLATINUM" };
 
+        private static string serverRootDomainTemplate = "https://{0}.api.pvp.net/";
+
         private static string seedQueryTemplate = "https://{0}.api.pvp.net/api/lol/{1}/v2.5/league/{2}?" +
             "type={3}&api_key={4}";
 
@@ -68,51 +70,65 @@ namespace LoLData
             this.logFile = new FileManager(String.Format(ServerManager.logFilePathTemplate, this.server));
             lock (this.logFile)
             {
-                this.logFile.writeLine(String.Format("{0} {1} ======== Log file created.", DateTime.Now.ToLongTimeString(),
+                this.logFile.WriteLine(String.Format("{0} {1} ======== Log file created.", DateTime.Now.ToLongTimeString(),
                     DateTime.Now.ToLongDateString()));
             }
             this.playersFile = new FileManager(String.Format(ServerManager.playersFilePathTemplate, this.server));
             this.gamesFile = new FileManager(String.Format(ServerManager.gamesFilePathTemplate, this.server));
-            this.queryManager = new QueryManager(this.logFile);
+            this.queryManager = new QueryManager(this.logFile, String.Format(ServerManager.serverRootDomainTemplate, this.server));
         }
 
-        public void initiateNewSeedScan()
+        public async void InitiateNewSeedScan()
         {
             for (int i = 0; i < ServerManager.leagueSeed.Length; i++ )
             {
                 string queryString = String.Format(ServerManager.seedQueryTemplate, this.server.ToLower(), 
                     this.server.ToLower(), ServerManager.leagueSeed[i].ToLower(), ServerManager.gameType, this.apiKey);
-                JObject league = this.queryManager.makeQuery(queryString);
-                if(league == null)
+                try
                 {
-                    return;
-                }
-                JArray players = (JArray) league["entries"];
-                string tier = (string) league["tier"];
-                for (int j = 0; j < players.Count; j++) 
-                {
-                    JObject player = (JObject) players[j];
-                    string playerId = (string) player["playerOrTeamId"];
-                    if (validatePlayer(playerId, tier)) 
+                    JObject league = await this.queryManager.MakeQuery(queryString);
+                    if (league == null)
                     {
-                        playersToProcess.Add(playerId, 1);
-                        lock (this.playersFile) 
+                        return;
+                    }
+                    JArray players = (JArray)league["entries"];
+                    string tier = (string)league["tier"];
+                    for (int j = 0; j < players.Count; j++)
+                    {
+                        JObject player = (JObject)players[j];
+                        string playerId = (string)player["playerOrTeamId"];
+                        if (ValidatePlayer(playerId, tier))
                         {
-                            this.playersFile.writeLine(playerId);
+                            playersToProcess.Add(playerId, 1);
+                            lock (this.playersFile)
+                            {
+                                this.playersFile.WriteLine(playerId);
+                            }
+                            lock (this.logFile)
+                            {
+                                this.logFile.WriteLine(String.Format("{0} {1} ======== Player Qualified for Process: {2} (Seed Scan)", 
+                                    DateTime.Now.ToLongTimeString(), DateTime.Now.ToLongDateString(), playerId));
+                            }
                         }
-                        lock (this.logFile)
-                        {
-                            this.logFile.writeLine(String.Format("{0} {1} ======== Player Qualified for Process: {2} (Seed Scan)", DateTime.Now.ToLongTimeString(),
-                                DateTime.Now.ToLongDateString(), playerId));
-                        }                       
                     }
                 }
-                this.logFile.writerFlush();
-                this.playersFile.writerFlush();
+                catch (Exception e)
+                {
+                    lock (this.logFile)
+                    {
+                        this.logFile.WriterLogError(e.ToString());
+                        this.logFile.WriterFlush();
+                    }
+                }
+                finally 
+                {
+                    this.logFile.WriterFlush();
+                    this.playersFile.WriterFlush();
+                }
             }          
         }
 
-        public bool processAllPlayers(int remainingWaits = -1) 
+        public bool ProcessAllPlayers(int remainingWaits = -1) 
         {
             if (remainingWaits == -1) 
             {
@@ -123,7 +139,7 @@ namespace LoLData
             {
                 // TODO: Make the call async as well.
                 // Not necessary for now as the bottleneck is rate limiting.
-                this.processNextPlayer();
+                this.ProcessNextPlayer();
                 remainingWaits = ServerManager.maxProcessQueueWaits;
             }
             System.Threading.Thread.Sleep(ServerManager.cooldownInterval);
@@ -133,15 +149,15 @@ namespace LoLData
             if (remainingWaits == 0)
             {
                 System.Diagnostics.Debug.WriteLine("****************");
-                System.Diagnostics.Debug.WriteLine(this.getTotalPlayersCount());
+                System.Diagnostics.Debug.WriteLine(this.GetTotalPlayersCount());
                 System.Diagnostics.Debug.WriteLine("****************");
-                System.Diagnostics.Debug.WriteLine(this.getTotalGamesCount());
+                System.Diagnostics.Debug.WriteLine(this.GetTotalGamesCount());
                 return true;
             }
-            return this.processAllPlayers(remainingWaits);
+            return this.ProcessAllPlayers(remainingWaits);
         }
 
-        public int getTotalPlayersCount()
+        public int GetTotalPlayersCount()
         {
             // Only an approximate, yielding access to data processing work
             return this.playersToProcess.Keys.Count + 
@@ -149,20 +165,20 @@ namespace LoLData
                 this.playersProcessed.Keys.Count;
         }
 
-        public int getTotalGamesCount()
+        public int GetTotalGamesCount()
         {
             // Only an approximate, yielding access to data processing work
             return this.gamesProcessed.Keys.Count;
         }
 
-        public void closeAllFiles() 
+        public void CloseAllFiles() 
         {
-            this.logFile.writerClose();
-            this.playersFile.writerClose();
-            this.gamesFile.writerClose();
+            this.logFile.WriterClose();
+            this.playersFile.WriterClose();
+            this.gamesFile.WriterClose();
         }
 
-        private void processNextPlayer() 
+        private async void ProcessNextPlayer() 
         {
             string playerId;
             lock (this.playersToProcess) lock (this.playersUnderProcess)
@@ -172,60 +188,68 @@ namespace LoLData
                 this.playersUnderProcess.Add(playerId, 1); 
             }            
             string queryString = String.Format(ServerManager.gamesQueryTemplate, this.server.ToLower(), 
-                this.server.ToLower(), playerId, this.apiKey);
-            JObject gamesResponse = this.queryManager.makeQuery(queryString);
-
-            if(gamesResponse != null)
+                this.server.ToLower(), playerId, this.apiKey);            
+            try
             {
-                JArray games = (JArray)gamesResponse["games"];
-
-                for (int i = 0; i < games.Count; i++)
+                JObject gamesResponse = await this.queryManager.MakeQuery(queryString);
+                if (gamesResponse != null)
                 {
-                    JObject game = (JObject)games.ElementAt(i);
-                    try 
+                    JArray games = (JArray)gamesResponse["games"];
+
+                    for (int i = 0; i < games.Count; i++)
                     {
-                        Task.Run(() => processGame(game));
-                    }
-                    catch (AggregateException ae)
-                    {
-                        lock (this.logFile)
+                        JObject game = (JObject)games.ElementAt(i);
+                        try
                         {
-                            var flattenedAe = ae.Flatten();
-                            this.logFile.writeLine("****************");
-                            this.logFile.writeLine("Error encountered in processGame: ");
-                            this.logFile.writeLine(flattenedAe.ToString());
-                            this.logFile.writeLine("****************");
-                            this.logFile.writerFlush();
+                            Task.Run(() => ProcessGame(game));
+                        }
+                        catch (AggregateException ae)
+                        {
+                            lock (this.logFile)
+                            {
+                                var flattenedAe = ae.Flatten();
+                                this.logFile.WriterLogError(ae.ToString());
+                                this.logFile.WriterFlush();
+                            }
                         }
                     }
+                    lock (this.playersProcessed)
+                    {
+                        this.playersProcessed.Add(playerId, 1);
+                        System.Diagnostics.Debug.WriteLine(String.Format("{0} ========= Player {1} processed. Overall - Done: {2}  InProgress: {3}  ToDo: {4}.",
+                            DateTime.Now.ToLongTimeString(), playerId, this.playersProcessed.Keys.Count, this.playersUnderProcess.Keys.Count,
+                            this.playersToProcess.Keys.Count));
+                    } 
                 }
-            }         
-
-            // TODO: Write playerId to cache
-            int playerCount;
-            lock (this.playersUnderProcess) lock (this.playersProcessed)
-            {
-                this.playersUnderProcess.Remove(playerId);
-                this.playersProcessed.Add(playerId, 1);
+                lock (this.playersUnderProcess) 
+                {
+                    this.playersUnderProcess.Remove(playerId);
+                }              
             }
-            System.Diagnostics.Debug.WriteLine(String.Format("{0} ========= Player {1} processed. Overall - Done: {2}  InProgress: {3}  ToDo: {4}.",
-                DateTime.Now.ToLongTimeString(), playerId, this.playersProcessed.Keys.Count, this.playersUnderProcess.Keys.Count, 
-                this.playersToProcess.Keys.Count));
+            catch (Exception e)
+            {
+                lock (this.logFile)
+                {
+                    this.logFile.WriterLogError(e.ToString());
+                    this.logFile.WriterFlush();
+                }
+            }
+            int playerCount;
             playerCount = this.playersProcessed.Keys.Count;
             if (playerCount % ServerManager.gamesProgressReport == 0)
             {
                 System.Diagnostics.Debug.WriteLine(String.Format("===== {0} server now has processed {1} players.", 
                     this.server, playerCount));
                 System.Diagnostics.Debug.WriteLine(String.Format("===== {0} server now has processed {1} games.",
-                    this.server, this.getTotalGamesCount()));
+                    this.server, this.GetTotalGamesCount()));
             }
         }
 
-        private void processGame(JObject game)
+        private void ProcessGame(JObject game)
         {
             if (((string) game["subType"]).Equals(ServerManager.gameType))
             {
-                registerGame(game);
+                RegisterGame(game);
             }
             JArray fellowPlayers = (JArray) game["fellowPlayers"];
             if(fellowPlayers == null)
@@ -240,63 +264,71 @@ namespace LoLData
             }
             try
             {
-                Task.Run(() => this.processPlayerFromGame(summonerIds));
+                Task.Run(() => this.ProcessPlayerFromGame(summonerIds));
             }
             catch (AggregateException ae)
             {
                 lock (this.logFile)
                 {
                     var flattenedAe = ae.Flatten();
-                    this.logFile.writeLine("****************");
-                    this.logFile.writeLine("Error encountered in processPlayerFromGame: ");
-                    this.logFile.writeLine(flattenedAe.ToString());
-                    this.logFile.writeLine("****************");
-                    this.logFile.writerFlush();
+                    this.logFile.WriterLogError(ae.ToString());
+                    this.logFile.WriterFlush();
                 }
             }
         }
 
-        private void processPlayerFromGame(string[] summonerIds) 
+        private async void ProcessPlayerFromGame(string[] summonerIds) 
         {
             string summonerIdsParam = String.Join(",", summonerIds);
             string queryString = String.Format(ServerManager.summonerQueryTemplate, this.server.ToLower(),
                     this.server.ToLower(), summonerIdsParam, this.apiKey);
-            JObject summoners = this.queryManager.makeQuery(queryString);
-            if (summoners != null)
+            try
             {
-                for (int i = 0; i < summonerIds.Length; i++)
+                JObject summoners = await this.queryManager.MakeQuery(queryString);
+                if (summoners != null)
                 {
-                    string summonerId = summonerIds[i];
-                    JArray queues = (JArray)summoners[summonerId];
-                    for (int j = 0; queues != null && j < queues.Count; j++)
+                    for (int i = 0; i < summonerIds.Length; i++)
                     {
-                        string tier = (string)((JObject)queues[j])["tier"];
-                        if (((string)((JObject)queues[j])["queue"]).Equals(ServerManager.gameType)
-                                && this.validatePlayer(summonerId, tier))
+                        string summonerId = summonerIds[i];
+                        JArray queues = (JArray)summoners[summonerId];
+                        for (int j = 0; queues != null && j < queues.Count; j++)
                         {
-                            lock (this.playersToProcess)
+                            string tier = (string)((JObject)queues[j])["tier"];
+                            if (((string)((JObject)queues[j])["queue"]).Equals(ServerManager.gameType)
+                                    && this.ValidatePlayer(summonerId, tier))
                             {
-                                this.playersToProcess.Add(summonerId, 1);
+                                lock (this.playersToProcess)
+                                {
+                                    this.playersToProcess.Add(summonerId, 1);
+                                }
+                                lock (this.playersFile)
+                                {
+                                    this.playersFile.WriteLine(summonerId);
+                                    this.playersFile.WriterFlush();
+                                }
+                                lock (this.logFile)
+                                {
+                                    this.logFile.WriteLine(String.Format("{0} {1} ======== Player Qualified for Process: {2} ({3})", DateTime.Now.ToLongTimeString(),
+                                        DateTime.Now.ToLongDateString(), summonerId, tier));
+                                    this.logFile.WriterFlush();
+                                }
+                                break;
                             }
-                            lock (this.playersFile)
-                            {
-                                this.playersFile.writeLine(summonerId);
-                                this.playersFile.writerFlush();
-                            }
-                            lock (this.logFile)
-                            {
-                                this.logFile.writeLine(String.Format("{0} {1} ======== Player Qualified for Process: {2} ({3})", DateTime.Now.ToLongTimeString(),
-                                    DateTime.Now.ToLongDateString(), summonerId, tier));
-                                this.logFile.writerFlush();
-                            }
-                            break;
                         }
                     }
                 }
-            }     
+            }
+            catch (Exception e)
+            {
+                lock (this.logFile)
+                {
+                    this.logFile.WriterLogError(e.ToString());
+                    this.logFile.WriterFlush();
+                }
+            }    
         }
 
-        private void registerGame(JObject game)
+        private void RegisterGame(JObject game)
         {
             // TODO: Game analysis implementation
             string gameId = null;
@@ -310,18 +342,18 @@ namespace LoLData
             }
             lock (this.gamesFile)
             {
-                this.gamesFile.writeLine(gameId);
-                this.gamesFile.writerFlush();
+                this.gamesFile.WriteLine(gameId);
+                this.gamesFile.WriterFlush();
             }
             lock (this.logFile)
             {
-                this.logFile.writeLine(String.Format("{0} {1} ======== Game Registered {2}", DateTime.Now.ToLongTimeString(),
+                this.logFile.WriteLine(String.Format("{0} {1} ======== Game Registered {2}", DateTime.Now.ToLongTimeString(),
                     DateTime.Now.ToLongDateString(), gameId));
-                this.logFile.writerFlush();
+                this.logFile.WriterFlush();
             }
         }
 
-        private bool validatePlayer(string playerId, string tier) 
+        private bool ValidatePlayer(string playerId, string tier) 
         {
             lock (this.playersToProcess) lock (this.playersUnderProcess) lock (this.playersProcessed)
             {

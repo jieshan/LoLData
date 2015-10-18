@@ -16,7 +16,7 @@ namespace LoLData.DataCollection
 
         public static void Main() 
         {
-            apiKey = apiKey == null ? new FileManager(DataCollection.apiKeyPath).readOneLine() : apiKey;
+            apiKey = apiKey == null ? new FileManager(DataCollection.apiKeyPath).ReadOneLine() : apiKey;
 
             System.Diagnostics.Debug.WriteLine("============================");
             System.Diagnostics.Debug.WriteLine("Data Collection Starts");
@@ -27,12 +27,12 @@ namespace LoLData.DataCollection
                 ServerManager queryManager = new ServerManager(serverList[0], DataCollection.apiKey);
                 try
                 {
-                    queryManager.initiateNewSeedScan();
-                    queryManager.processAllPlayers();
+                    queryManager.InitiateNewSeedScan();
+                    queryManager.ProcessAllPlayers();
                 }
                 finally
                 {
-                    queryManager.closeAllFiles();
+                    queryManager.CloseAllFiles();
                     System.Diagnostics.Debug.WriteLine("****************");
                     System.Diagnostics.Debug.WriteLine(String.Format("Error in collecting {0} server.", serverList[0]));
                 }              

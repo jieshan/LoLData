@@ -5,14 +5,19 @@ using System.Text;
 using System.Net.Http;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
+using System.Net;
 
 namespace LoLData.DataCollection
 {
     public class QueryManager
     {
-        private static int rateLimitBuffer = 1200;
+        private static int clientTimeout = 600000;
 
-        private static int webQueryTimeLimit = 600000;
+        private static int rateLimitBuffer = 1210;
+
+        private static int maxQueryRetry = 3;
+
+        private static int maxConcurrentApiCall = 1;
 
         private static string retryHeader = "Retry-After";
 
@@ -22,88 +27,76 @@ namespace LoLData.DataCollection
 
         private FileManager logFile;
 
-        private int looseGlobalRetryAfter;
+        private int globalRetryAfter;
 
-        public QueryManager(FileManager logFile) 
+        public QueryManager(FileManager logFile, string apiRootDomain) 
         {
+            Uri uri = new Uri(apiRootDomain);
+            ServicePoint sp = ServicePointManager.FindServicePoint(uri);
+            sp.ConnectionLimit = maxConcurrentApiCall;
             this.httpClient = new HttpClient();
+            this.httpClient.Timeout = TimeSpan.FromMilliseconds(QueryManager.clientTimeout);
             this.queryLock = new Object();
             this.logFile = logFile;
-            this.looseGlobalRetryAfter = 0;
+            this.globalRetryAfter = 0;
         }
 
-        public JObject makeQuery(string queryString) 
+        public async Task<JObject> MakeQuery(string queryString, int retry = 0) 
         {
-            int statusCode = -1;
             JObject result = null;
-            string responseJson = null;
-            int retryAfter = 0;
+            // Only a loose rate limiting management, because of async calls
             lock (queryLock)
             {
-                if (this.looseGlobalRetryAfter > 0)
-                {
-                    // Other threads hit rate limiting
-                    System.Threading.Thread.Sleep(this.looseGlobalRetryAfter);
-                }
-                else
-                {
-                    // Rate limiting requirement
-                    System.Threading.Thread.Sleep(QueryManager.rateLimitBuffer);
-                }
+                System.Threading.Thread.Sleep(this.globalRetryAfter);
             }
-            Task fetchJson = Task.Run(() => {
-                var httpResponse = QueryManager.executeQuery(this.httpClient, queryString);
-                statusCode = (int) httpResponse.Result.StatusCode;
-                var responseContent = QueryManager.readResponseContent(httpResponse.Result);
-                responseJson = responseContent.Result;
-                IEnumerable<string> retryHeaderValue;
-                if (httpResponse.Result.Headers.TryGetValues(QueryManager.retryHeader, out retryHeaderValue))
-                {
-                    retryAfter = int.Parse(retryHeaderValue.FirstOrDefault()) * 1000;
-                }
-            });
-            fetchJson.Wait(QueryManager.webQueryTimeLimit);
-            System.Diagnostics.Debug.WriteLine(String.Format("{0} ==== Query: {1} {2}", DateTime.Now.ToLongTimeString(), 
+
+            var httpResponse = await QueryManager.ExecuteQuery(this.httpClient, queryString);
+            int statusCode = (int) httpResponse.StatusCode;
+            System.Diagnostics.Debug.WriteLine(String.Format("{0} ==== Query: {1} {2}", DateTime.Now.ToLongTimeString(),
                 statusCode, queryString));
+            if (statusCode == 429)
+            {
+                int retryAfter = int.Parse(httpResponse.Headers.GetValues(QueryManager.retryHeader).FirstOrDefault()) * 1000;
+                System.Diagnostics.Debug.WriteLine(String.Format("== Rate Limit hit. Retry after {0} milliseconds. Query: {1}",
+                    retryAfter, queryString));
+                lock (queryLock)
+                {
+                    this.globalRetryAfter = retryAfter;
+                }
+
+            }
+
+            var responseContent = await QueryManager.ReadResponseContent(httpResponse);
             lock (this.logFile)
             {
-                this.logFile.writeLine(String.Format("{0} {1} == Query: {2} {3}", DateTime.Now.ToLongTimeString(),
+                this.logFile.WriteLine(String.Format("{0} {1} == Query: {2} {3}", DateTime.Now.ToLongTimeString(),
                     DateTime.Now.ToLongDateString(), statusCode, queryString));
-                this.logFile.writerFlush();
+                this.logFile.WriterFlush();
             }
             if (statusCode == 200)
             {
-                result = JObject.Parse(responseJson);
-            }
-            else
-            {
-                if (statusCode == 429)
-                {           
-                    System.Diagnostics.Debug.WriteLine(String.Format("== Rate Limit hit. Retry after {0} milliseconds. Query: {1}",
-                        retryAfter, queryString));
-                    lock (queryLock)
-                    {
-                        this.looseGlobalRetryAfter = retryAfter;
-                        // Extra buffer time in case of accidental hitting rate limiting
-                        System.Threading.Thread.Sleep(retryAfter);
-                        this.looseGlobalRetryAfter = 0;
-                    }
-                
+                result = JObject.Parse(responseContent);
+                lock (queryLock)
+                {
+                    this.globalRetryAfter = QueryManager.rateLimitBuffer;
                 }
-                return makeQuery(queryString);
             }
+            else if (retry < QueryManager.maxQueryRetry)
+            {
+                return await MakeQuery(queryString, retry + 1);
+            }                
             return result;
         }
 
-        private static async Task<HttpResponseMessage> executeQuery(HttpClient client, string uri)
+        private static async Task<HttpResponseMessage> ExecuteQuery(HttpClient client, string uri)
         {
-            HttpResponseMessage response = await client.GetAsync(uri).ConfigureAwait(false);
+            HttpResponseMessage response = await client.GetAsync(uri);
             return response;
         }
 
-        private static async Task<string> readResponseContent(HttpResponseMessage response)
+        private static async Task<string> ReadResponseContent(HttpResponseMessage response)
         {
-            string content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            string content = await response.Content.ReadAsStringAsync();
             return content;
         }
     }

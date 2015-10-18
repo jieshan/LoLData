@@ -20,7 +20,7 @@ namespace LoLData.DataCollection
             this.filePath = filePath;
         }
 
-        public string readOneLine()
+        public string ReadOneLine()
         {
             try
             {
@@ -45,7 +45,7 @@ namespace LoLData.DataCollection
             }
         }
 
-        public void writeLine(string line) 
+        public void WriteLine(string line) 
         {
             if (this.reader != null) 
             {
@@ -59,7 +59,7 @@ namespace LoLData.DataCollection
             this.writer.WriteLine(line);
         }
 
-        public void writerClose() 
+        public void WriterClose() 
         {
             if (this.writer != null)
             {
@@ -67,12 +67,25 @@ namespace LoLData.DataCollection
             }
         }
 
-        public void writerFlush()
+        public void WriterFlush()
         {
             if (this.writer != null)
             {
                 this.writer.Flush();
             }
+        }
+
+        public void WriterLogError(string errorString) 
+        {
+            if (this.writer == null)
+            {
+                string currentDirectory = Directory.GetCurrentDirectory();
+                this.writer = new StreamWriter(@Path.Combine(currentDirectory, this.filePath));
+            }
+            this.writer.WriteLine("****************");
+            this.writer.WriteLine("Error encountered: ");
+            this.writer.WriteLine(errorString);
+            this.writer.WriteLine("****************");
         }
     }
 }
