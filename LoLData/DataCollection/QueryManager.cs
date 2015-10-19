@@ -17,8 +17,6 @@ namespace LoLData.DataCollection
 
         private static int maxQueryRetry = 3;
 
-        private static int maxConcurrentApiCall = 1;
-
         private static string retryHeader = "Retry-After";
 
         private HttpClient httpClient;
@@ -31,9 +29,6 @@ namespace LoLData.DataCollection
 
         public QueryManager(FileManager logFile, string apiRootDomain) 
         {
-            Uri uri = new Uri(apiRootDomain);
-            ServicePoint sp = ServicePointManager.FindServicePoint(uri);
-            sp.ConnectionLimit = maxConcurrentApiCall;
             this.httpClient = new HttpClient();
             this.httpClient.Timeout = TimeSpan.FromMilliseconds(QueryManager.clientTimeout);
             this.queryLock = new Object();
@@ -52,6 +47,9 @@ namespace LoLData.DataCollection
 
             var httpResponse = await QueryManager.ExecuteQuery(this.httpClient, queryString);
             int statusCode = (int) httpResponse.StatusCode;
+            lock(ServerManager.currentWebCallsLock){
+                ServerManager.currentWebCalls --;
+            }
             System.Diagnostics.Debug.WriteLine(String.Format("{0} ==== Query: {1} {2}", DateTime.Now.ToLongTimeString(),
                 statusCode, queryString));
             if (statusCode == 429)

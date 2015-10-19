@@ -16,6 +16,8 @@ namespace LoLData
 
         private static int gamesProgressReport = 50;
 
+        private static int maxServersThreads = 400;
+
         private static string logFilePathTemplate = "..\\..\\CachedData\\{0}log.txt";
 
         private static string playersFilePathTemplate = "..\\..\\CachedData\\{0}players.txt";
@@ -38,6 +40,10 @@ namespace LoLData
 
         private static string summonerQueryTemplate = "https://{0}.api.pvp.net/api/lol/{1}/v2.5/league/" + 
             "by-summoner/{2}/entry?api_key={3}";
+
+        public static Object currentWebCallsLock = new Object();
+
+        public static int currentWebCalls = 0;
 
         private Dictionary<string, int> playersToProcess;
 
@@ -86,6 +92,7 @@ namespace LoLData
                     this.server.ToLower(), ServerManager.leagueSeed[i].ToLower(), ServerManager.gameType, this.apiKey);
                 try
                 {
+                    this.VerifyWebCallCapacity();
                     JObject league = await this.queryManager.MakeQuery(queryString);
                     if (league == null)
                     {
@@ -137,8 +144,6 @@ namespace LoLData
             int remainingPlayers = this.playersToProcess.Keys.Count;
             while (remainingPlayers > 0)
             {
-                // TODO: Make the call async as well.
-                // Not necessary for now as the bottleneck is rate limiting.
                 this.ProcessNextPlayer();
                 remainingWaits = ServerManager.maxProcessQueueWaits;
             }
@@ -191,6 +196,7 @@ namespace LoLData
                 this.server.ToLower(), playerId, this.apiKey);            
             try
             {
+                this.VerifyWebCallCapacity();
                 JObject gamesResponse = await this.queryManager.MakeQuery(queryString);
                 if (gamesResponse != null)
                 {
@@ -284,6 +290,7 @@ namespace LoLData
                     this.server.ToLower(), summonerIdsParam, this.apiKey);
             try
             {
+                this.VerifyWebCallCapacity();
                 JObject summoners = await this.queryManager.MakeQuery(queryString);
                 if (summoners != null)
                 {
@@ -359,6 +366,36 @@ namespace LoLData
             {
                 return !this.playersToProcess.ContainsKey(playerId) && !this.playersUnderProcess.ContainsKey(playerId)
                     && !this.playersProcessed.ContainsKey(playerId) && qualifiedLeagues.Contains(tier.ToUpper()) ? true : false;
+            }
+        }
+
+        private bool VerifyWebCallCapacity() 
+        {
+            bool canProceed = false;
+            while (true)
+            {
+                lock (ServerManager.currentWebCallsLock)
+                {
+                    if (ServerManager.currentWebCalls < ServerManager.maxServersThreads)
+                    {
+                        ServerManager.currentWebCalls ++;
+                        canProceed = true;
+                    }
+                }
+                if (!canProceed)
+                {
+                    lock (this.logFile)
+                    {
+                        this.logFile.WriteLine(String.Format("{0} {1} ======== System reached web call limit. Pausing...", DateTime.Now.ToLongTimeString(),
+                            DateTime.Now.ToLongDateString()));
+                        this.logFile.WriterFlush();
+                    }
+                    System.Threading.Thread.Sleep(ServerManager.cooldownInterval);
+                }
+                else
+                {
+                    return true;
+                }
             }
         }
     }
