@@ -47,7 +47,7 @@ namespace LoLData.DataCollection
 
             var httpResponse = await QueryManager.ExecuteQuery(this.httpClient, queryString);
             int statusCode = (int) httpResponse.StatusCode;
-            lock(ServerManager.currentWebCallsLock){
+            lock(ServerManager.currentThreadsLock){
                 ServerManager.currentWebCalls --;
             }
             System.Diagnostics.Debug.WriteLine(String.Format("{0} ==== Query: {1} {2}", DateTime.Now.ToLongTimeString(),

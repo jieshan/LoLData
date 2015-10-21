@@ -41,7 +41,7 @@ namespace LoLData
         private static string summonerQueryTemplate = "https://{0}.api.pvp.net/api/lol/{1}/v2.5/league/" + 
             "by-summoner/{2}/entry?api_key={3}";
 
-        public static Object currentWebCallsLock = new Object();
+        public static Object currentThreadsLock = new Object();
 
         public static int currentWebCalls = 0;
 
@@ -92,7 +92,7 @@ namespace LoLData
                     this.server.ToLower(), ServerManager.leagueSeed[i].ToLower(), ServerManager.gameType, this.apiKey);
                 try
                 {
-                    this.VerifyWebCallCapacity();
+                    this.VerifyThreadsCapacity();
                     JObject league = await this.queryManager.MakeQuery(queryString);
                     if (league == null)
                     {
@@ -144,6 +144,7 @@ namespace LoLData
             int remainingPlayers = this.playersToProcess.Keys.Count;
             while (remainingPlayers > 0)
             {
+                this.VerifyThreadsCapacity();
                 this.ProcessNextPlayer();
                 remainingWaits = ServerManager.maxProcessQueueWaits;
             }
@@ -196,7 +197,7 @@ namespace LoLData
                 this.server.ToLower(), playerId, this.apiKey);            
             try
             {
-                this.VerifyWebCallCapacity();
+                this.VerifyThreadsCapacity();
                 JObject gamesResponse = await this.queryManager.MakeQuery(queryString);
                 if (gamesResponse != null)
                 {
@@ -207,6 +208,7 @@ namespace LoLData
                         JObject game = (JObject)games.ElementAt(i);
                         try
                         {
+                            this.VerifyThreadsCapacity();
                             Task.Run(() => ProcessGame(game));
                         }
                         catch (AggregateException ae)
@@ -240,6 +242,10 @@ namespace LoLData
                     this.logFile.WriterFlush();
                 }
             }
+            lock (ServerManager.currentThreadsLock)
+            {
+                ServerManager.currentWebCalls--;
+            }
             int playerCount;
             playerCount = this.playersProcessed.Keys.Count;
             if (playerCount % ServerManager.gamesProgressReport == 0)
@@ -270,6 +276,7 @@ namespace LoLData
             }
             try
             {
+                this.VerifyThreadsCapacity();
                 Task.Run(() => this.ProcessPlayerFromGame(summonerIds));
             }
             catch (AggregateException ae)
@@ -281,6 +288,10 @@ namespace LoLData
                     this.logFile.WriterFlush();
                 }
             }
+            lock (ServerManager.currentThreadsLock)
+            {
+                ServerManager.currentWebCalls--;
+            }
         }
 
         private async void ProcessPlayerFromGame(string[] summonerIds) 
@@ -290,7 +301,7 @@ namespace LoLData
                     this.server.ToLower(), summonerIdsParam, this.apiKey);
             try
             {
-                this.VerifyWebCallCapacity();
+                this.VerifyThreadsCapacity();
                 JObject summoners = await this.queryManager.MakeQuery(queryString);
                 if (summoners != null)
                 {
@@ -332,7 +343,11 @@ namespace LoLData
                     this.logFile.WriterLogError(e.ToString());
                     this.logFile.WriterFlush();
                 }
-            }    
+            }
+            lock (ServerManager.currentThreadsLock)
+            {
+                ServerManager.currentWebCalls--;
+            }
         }
 
         private void RegisterGame(JObject game)
@@ -369,12 +384,12 @@ namespace LoLData
             }
         }
 
-        private bool VerifyWebCallCapacity() 
+        private bool VerifyThreadsCapacity() 
         {
             bool canProceed = false;
             while (true)
             {
-                lock (ServerManager.currentWebCallsLock)
+                lock (ServerManager.currentThreadsLock)
                 {
                     if (ServerManager.currentWebCalls < ServerManager.maxServersThreads)
                     {
