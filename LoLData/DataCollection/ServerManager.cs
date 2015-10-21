@@ -10,13 +10,19 @@ namespace LoLData
 {
     public class ServerManager
     {
-        private static int cooldownInterval = 5000;
+        private static int batchCoolDownInterval = 200000;
 
-        private static int maxProcessQueueWaits = 12;
+        private static int playerBatchSize = 500;
+
+        private static int cooldownInterval = 10000;
+
+        private static int maxProcessQueueWaits = 6;
 
         private static int gamesProgressReport = 50;
 
         private static int maxServersThreads = 400;
+
+        private static int maxPlayersPerQuery = 10;
 
         private static string logFilePathTemplate = "..\\..\\CachedData\\{0}log.txt";
 
@@ -47,11 +53,19 @@ namespace LoLData
 
         private Dictionary<string, int> playersToProcess;
 
+        private Dictionary<string, int> playersInQueue;
+
         private Dictionary<string, int> playersUnderProcess;
 
         private Dictionary<string, int> playersProcessed;
 
+        private Dictionary<string, int> playersInQuery;
+
+        private Dictionary<string, int> playersDiscarded;
+
         private Dictionary<string, int> gamesProcessed;
+
+        private List<string> newSummoners;
 
         private QueryManager queryManager;
 
@@ -65,14 +79,24 @@ namespace LoLData
 
         private FileManager gamesFile;
 
+        private Object badRequestPlayersLock;
+
+        private int badRequestPlayers;
+
         public ServerManager(string serverName, string apiKey) 
         {
             this.server = serverName;
             this.apiKey = apiKey;
             this.playersToProcess = new Dictionary<string, int>();
+            this.playersInQueue = new Dictionary<string, int>();
             this.playersUnderProcess = new Dictionary<string, int>();
             this.playersProcessed = new Dictionary<string, int>();
+            this.playersInQuery = new Dictionary<string, int>();
+            this.playersDiscarded = new Dictionary<string, int>();
             this.gamesProcessed = new Dictionary<string, int>();
+            this.newSummoners = new List<string>();
+            this.badRequestPlayersLock = new Object();
+            this.badRequestPlayers = 0;
             this.logFile = new FileManager(String.Format(ServerManager.logFilePathTemplate, this.server));
             lock (this.logFile)
             {
@@ -104,7 +128,7 @@ namespace LoLData
                     {
                         JObject player = (JObject)players[j];
                         string playerId = (string)player["playerOrTeamId"];
-                        if (ValidatePlayer(playerId, tier))
+                        if (ValidateNewPlayer(playerId))
                         {
                             playersToProcess.Add(playerId, 1);
                             lock (this.playersFile)
@@ -137,25 +161,67 @@ namespace LoLData
 
         public bool ProcessAllPlayers(int remainingWaits = -1) 
         {
+            if (this.playersProcessed.Count == 0)
+            {
+                this.GetNextPlayerBatch();
+            }
             if (remainingWaits == -1) 
             {
                 remainingWaits = ServerManager.maxProcessQueueWaits;
             }
-            int remainingPlayers = this.playersToProcess.Keys.Count;
-            while (remainingPlayers > 0)
+            while (true)
             {
+                lock (this.playersInQueue)
+                {
+                    if (this.playersInQueue.Count == 0)
+                    {
+                        break;
+                    }
+                }               
                 this.VerifyThreadsCapacity();
                 this.ProcessNextPlayer();
                 remainingWaits = ServerManager.maxProcessQueueWaits;
             }
-            System.Threading.Thread.Sleep(ServerManager.cooldownInterval);
-            remainingWaits -= 1;
-            System.Diagnostics.Debug.WriteLine(String.Format("===== Remaining waits for more players to process: {0}.",
-               remainingWaits));
+            int playerUnderProcess;
+            lock (this.playersUnderProcess)
+            {
+                playerUnderProcess = this.playersUnderProcess.Count;
+            }
+            if (playerUnderProcess == 0)
+            {
+                int playerToProcess;
+                lock (this.playersToProcess)
+                {
+                    playerToProcess = this.playersToProcess.Count;
+                }
+                if (playerToProcess > 0)
+                {
+                    System.Diagnostics.Debug.WriteLine(String.Format("===== Batch completed. Breaking for {0} milliseconds.",
+                   ServerManager.batchCoolDownInterval));
+                    System.Threading.Thread.Sleep(ServerManager.batchCoolDownInterval);
+                    this.GetNextPlayerBatch();
+                }
+                else if (playerToProcess == 0)
+                {
+                    this.ProcessQueryQueueRemainder();
+                }
+            }
+
+            if (this.playersUnderProcess.Count == 0 && this.playersInQueue.Count == 0 && this.playersToProcess.Count == 0)
+            {
+                System.Threading.Thread.Sleep(ServerManager.cooldownInterval);
+                remainingWaits -= 1;
+                System.Diagnostics.Debug.WriteLine(String.Format("===== Remaining waits for more players to process: {0}.",
+                   remainingWaits));
+            }
+            else if (this.playersUnderProcess.Count > 0) 
+            {
+                System.Threading.Thread.Sleep(ServerManager.cooldownInterval);
+            }
             if (remainingWaits == 0)
             {
                 System.Diagnostics.Debug.WriteLine("****************");
-                System.Diagnostics.Debug.WriteLine(this.GetTotalPlayersCount());
+                System.Diagnostics.Debug.WriteLine(this.GetTotalValidPlayersCount());
                 System.Diagnostics.Debug.WriteLine("****************");
                 System.Diagnostics.Debug.WriteLine(this.GetTotalGamesCount());
                 return true;
@@ -163,18 +229,19 @@ namespace LoLData
             return this.ProcessAllPlayers(remainingWaits);
         }
 
-        public int GetTotalPlayersCount()
+        public int GetTotalValidPlayersCount()
         {
             // Only an approximate, yielding access to data processing work
-            return this.playersToProcess.Keys.Count + 
-                this.playersUnderProcess.Keys.Count + 
-                this.playersProcessed.Keys.Count;
+            return this.playersToProcess.Count + 
+                this.playersInQueue.Count +
+                this.playersUnderProcess.Count + 
+                this.playersProcessed.Count;
         }
 
         public int GetTotalGamesCount()
         {
             // Only an approximate, yielding access to data processing work
-            return this.gamesProcessed.Keys.Count;
+            return this.gamesProcessed.Count;
         }
 
         public void CloseAllFiles() 
@@ -186,13 +253,24 @@ namespace LoLData
 
         private async void ProcessNextPlayer() 
         {
-            string playerId;
-            lock (this.playersToProcess) lock (this.playersUnderProcess)
+            string playerId = null;
+            lock (this.playersInQueue) lock (this.playersUnderProcess)
             {
-                playerId = this.playersToProcess.Keys.ElementAt(0);
-                this.playersToProcess.Remove(playerId);
-                this.playersUnderProcess.Add(playerId, 1); 
-            }            
+                if (this.playersInQueue.Count > 0)
+                {
+                    playerId = this.playersInQueue.Keys.ElementAt(0);
+                    this.playersInQueue.Remove(playerId);
+                    this.playersUnderProcess.Add(playerId, 1);
+                }
+                else 
+                {
+                    lock (ServerManager.currentThreadsLock)
+                    {
+                        ServerManager.currentWebCalls--;
+                    }
+                    return;
+                }               
+            }
             string queryString = String.Format(ServerManager.gamesQueryTemplate, this.server.ToLower(), 
                 this.server.ToLower(), playerId, this.apiKey);            
             try
@@ -224,9 +302,12 @@ namespace LoLData
                     lock (this.playersProcessed)
                     {
                         this.playersProcessed.Add(playerId, 1);
-                        System.Diagnostics.Debug.WriteLine(String.Format("{0} ========= Player {1} processed. Overall - Done: {2}  InProgress: {3}  ToDo: {4}.",
-                            DateTime.Now.ToLongTimeString(), playerId, this.playersProcessed.Keys.Count, this.playersUnderProcess.Keys.Count,
-                            this.playersToProcess.Keys.Count));
+                        System.Diagnostics.Debug.WriteLine(String.Format("{0} {1} ==== Player {2} processed.", DateTime.Now.ToShortDateString(),
+                            DateTime.Now.ToLongTimeString(), playerId));
+                        System.Diagnostics.Debug.WriteLine(String.Format("{0} {1} ==== *Valid: {2} - Done: {3}. InProgress: {4}. InQueue: {5}. " +
+                            "ToDo: {6}. *Invalid: {7}. *InQuery: {8}. *BadRequests: {9}.", DateTime.Now.ToShortDateString(), DateTime.Now.ToLongTimeString(),
+                            this.GetTotalValidPlayersCount(), this.playersProcessed.Count, this.playersUnderProcess.Count, this.playersInQueue.Count, 
+                            this.playersToProcess.Count, this.playersDiscarded.Count, this.playersInQuery.Count, this.badRequestPlayers));
                     } 
                 }
                 lock (this.playersUnderProcess) 
@@ -247,14 +328,15 @@ namespace LoLData
                 ServerManager.currentWebCalls--;
             }
             int playerCount;
-            playerCount = this.playersProcessed.Keys.Count;
+            playerCount = this.playersProcessed.Count;
             if (playerCount % ServerManager.gamesProgressReport == 0)
             {
-                System.Diagnostics.Debug.WriteLine(String.Format("===== {0} server now has processed {1} players.", 
+                System.Diagnostics.Debug.WriteLine(String.Format("======== {0} server now has processed {1} players.", 
                     this.server, playerCount));
-                System.Diagnostics.Debug.WriteLine(String.Format("===== {0} server now has processed {1} games.",
+                System.Diagnostics.Debug.WriteLine(String.Format("======== {0} server now has processed {1} games.",
                     this.server, this.GetTotalGamesCount()));
             }
+            return;
         }
 
         private void ProcessGame(JObject game)
@@ -268,24 +350,50 @@ namespace LoLData
             {
                 return;
             }
-            string[] summonerIds = new string[fellowPlayers.Count];
+            string summonerIdsParam = null;
             for (int i = 0; i < fellowPlayers.Count; i++ )
             {
                 string summonerId = (string) ((JObject) fellowPlayers[i])["summonerId"];
-                summonerIds[i] = summonerId; 
-            }
-            try
-            {
-                this.VerifyThreadsCapacity();
-                Task.Run(() => this.ProcessPlayerFromGame(summonerIds));
-            }
-            catch (AggregateException ae)
-            {
-                lock (this.logFile)
+                if (this.ValidateNewPlayer(summonerId))
                 {
-                    var flattenedAe = ae.Flatten();
-                    this.logFile.WriterLogError(ae.ToString());
-                    this.logFile.WriterFlush();
+                    lock (this.playersInQuery)
+                    {
+                        this.playersInQuery.Add(summonerId, 1);
+                    }
+                    lock (this.newSummoners)
+                    {
+                        if (this.newSummoners.Count == ServerManager.maxPlayersPerQuery - 1) 
+                        {
+                            this.newSummoners.Add(summonerId);
+                            summonerIdsParam = String.Join(",", this.newSummoners);
+                            this.newSummoners = new List<string>();
+                        }
+                        else if (this.newSummoners.Count < ServerManager.maxPlayersPerQuery)
+                        {
+                            this.newSummoners.Add(summonerId);
+                        }
+                        else 
+                        {
+                            throw new Exception("Number of players in queue for by-entry query exceeds max limit.");
+                        }
+                    }
+                }
+            }
+            if (summonerIdsParam != null)
+            {
+                try
+                {
+                    this.VerifyThreadsCapacity();
+                    Task.Run(() => this.ProcessPlayerFromGame(summonerIdsParam));
+                }
+                catch (AggregateException ae)
+                {
+                    lock (this.logFile)
+                    {
+                        var flattenedAe = ae.Flatten();
+                        this.logFile.WriterLogError(ae.ToString());
+                        this.logFile.WriterFlush();
+                    }
                 }
             }
             lock (ServerManager.currentThreadsLock)
@@ -294,9 +402,8 @@ namespace LoLData
             }
         }
 
-        private async void ProcessPlayerFromGame(string[] summonerIds) 
+        private async void ProcessPlayerFromGame(string summonerIdsParam) 
         {
-            string summonerIdsParam = String.Join(",", summonerIds);
             string queryString = String.Format(ServerManager.summonerQueryTemplate, this.server.ToLower(),
                     this.server.ToLower(), summonerIdsParam, this.apiKey);
             try
@@ -305,32 +412,67 @@ namespace LoLData
                 JObject summoners = await this.queryManager.MakeQuery(queryString);
                 if (summoners != null)
                 {
+                    string[] summonerIds = summonerIdsParam.Split(',');
                     for (int i = 0; i < summonerIds.Length; i++)
                     {
                         string summonerId = summonerIds[i];
                         JArray queues = (JArray)summoners[summonerId];
-                        for (int j = 0; queues != null && j < queues.Count; j++)
+                        if (queues != null)
                         {
-                            string tier = (string)((JObject)queues[j])["tier"];
-                            if (((string)((JObject)queues[j])["queue"]).Equals(ServerManager.gameType)
-                                    && this.ValidatePlayer(summonerId, tier))
+                            for (int j = 0; j < queues.Count; j++)
                             {
-                                lock (this.playersToProcess)
+                                string tier = (string)((JObject)queues[j])["tier"];
+                                if (((string)((JObject)queues[j])["queue"]).Equals(ServerManager.gameType)
+                                        && this.ValidateNewPlayer(summonerId, true))
                                 {
-                                    this.playersToProcess.Add(summonerId, 1);
+                                    if (ServerManager.qualifiedLeagues.Contains(tier))
+                                    {
+                                        lock (this.playersToProcess)
+                                        {
+                                            this.playersToProcess.Add(summonerId, 1);
+                                        }
+                                        lock (this.playersInQuery)
+                                        {
+                                            this.playersInQuery.Remove(summonerId);
+                                        }
+                                        lock (this.playersFile)
+                                        {
+                                            this.playersFile.WriteLine(summonerId);
+                                            this.playersFile.WriterFlush();
+                                        }
+                                        lock (this.logFile)
+                                        {
+                                            this.logFile.WriteLine(String.Format("{0} {1} ======== Player Qualified for Process: {2} ({3})", DateTime.Now.ToLongTimeString(),
+                                                DateTime.Now.ToLongDateString(), summonerId, tier));
+                                            this.logFile.WriterFlush();
+                                        }
+                                    }
+                                    else
+                                    {
+                                        lock (this.playersDiscarded)
+                                        {
+                                            this.playersDiscarded.Add(summonerId, 1);
+                                        }
+                                        lock (this.playersInQuery)
+                                        {
+                                            this.playersInQuery.Remove(summonerId);
+                                        }
+                                        lock (this.logFile)
+                                        {
+                                            this.logFile.WriteLine(String.Format("{0} {1} ======== Player Disqualified for Process: {2} ({3})", DateTime.Now.ToLongTimeString(),
+                                                DateTime.Now.ToLongDateString(), summonerId, tier));
+                                            this.logFile.WriterFlush();
+                                        }
+                                    }
+                                    break;
                                 }
-                                lock (this.playersFile)
-                                {
-                                    this.playersFile.WriteLine(summonerId);
-                                    this.playersFile.WriterFlush();
-                                }
-                                lock (this.logFile)
-                                {
-                                    this.logFile.WriteLine(String.Format("{0} {1} ======== Player Qualified for Process: {2} ({3})", DateTime.Now.ToLongTimeString(),
-                                        DateTime.Now.ToLongDateString(), summonerId, tier));
-                                    this.logFile.WriterFlush();
-                                }
-                                break;
+                            }
+                        }
+                        else
+                        {
+                            lock (this.badRequestPlayersLock)
+                            {
+                                this.badRequestPlayers ++;
                             }
                         }
                     }
@@ -375,12 +517,72 @@ namespace LoLData
             }
         }
 
-        private bool ValidatePlayer(string playerId, string tier) 
+        private void ProcessQueryQueueRemainder()
         {
-            lock (this.playersToProcess) lock (this.playersUnderProcess) lock (this.playersProcessed)
+            string summonerIdsParam = null;
+            lock (this.newSummoners)
             {
-                return !this.playersToProcess.ContainsKey(playerId) && !this.playersUnderProcess.ContainsKey(playerId)
-                    && !this.playersProcessed.ContainsKey(playerId) && qualifiedLeagues.Contains(tier.ToUpper()) ? true : false;
+                if (this.newSummoners.Count > 0)
+                {
+                    summonerIdsParam = String.Join(",", this.newSummoners);
+                }
+            }
+            if (summonerIdsParam != null)
+            {
+                try
+                {
+                    this.VerifyThreadsCapacity();
+                    Task.Run(() => this.ProcessPlayerFromGame(summonerIdsParam));
+                }
+                catch (AggregateException ae)
+                {
+                    lock (this.logFile)
+                    {
+                        var flattenedAe = ae.Flatten();
+                        this.logFile.WriterLogError(ae.ToString());
+                        this.logFile.WriterFlush();
+                    }
+                }
+            }
+        }
+
+        private void GetNextPlayerBatch()
+        {
+            lock (this.playersToProcess) lock (this.playersInQueue)
+            {
+                int toProcessPlayerCount = this.playersToProcess.Count;
+                for (int i = 0; i < Math.Min(toProcessPlayerCount, ServerManager.playerBatchSize); i++)
+                {
+                    string nextSummonerId = this.playersToProcess.Keys.ElementAt(0);
+                    this.playersToProcess.Remove(nextSummonerId);
+                    this.playersInQueue.Add(nextSummonerId, 1);
+                }
+            }
+        }
+
+        private bool ValidateNewPlayer(string playerId, bool toAdd = false) 
+        {
+            if (!toAdd)
+            {
+                lock (this.playersToProcess) lock (this.playersInQueue) lock (this.playersUnderProcess)
+                    lock (this.playersProcessed) lock (this.playersInQuery) lock (this.playersDiscarded)
+                {
+                    return !this.playersToProcess.ContainsKey(playerId) && !this.playersInQueue.ContainsKey(playerId)
+                        && !this.playersUnderProcess.ContainsKey(playerId) && !this.playersProcessed.ContainsKey(playerId)
+                        && !this.playersInQuery.ContainsKey(playerId) && !this.playersDiscarded.ContainsKey(playerId)
+                        ? true : false;
+                }
+            }
+            else 
+            {
+                lock (this.playersToProcess) lock (this.playersInQueue) lock (this.playersUnderProcess)
+                    lock (this.playersProcessed) lock (this.playersDiscarded)
+                {
+                    return !this.playersToProcess.ContainsKey(playerId) && !this.playersInQueue.ContainsKey(playerId)
+                        && !this.playersUnderProcess.ContainsKey(playerId) && !this.playersProcessed.ContainsKey(playerId)
+                        && !this.playersDiscarded.ContainsKey(playerId)
+                        ? true : false;
+                }
             }
         }
 
@@ -399,12 +601,6 @@ namespace LoLData
                 }
                 if (!canProceed)
                 {
-                    lock (this.logFile)
-                    {
-                        this.logFile.WriteLine(String.Format("{0} {1} ======== System reached web call limit. Pausing...", DateTime.Now.ToLongTimeString(),
-                            DateTime.Now.ToLongDateString()));
-                        this.logFile.WriterFlush();
-                    }
                     System.Threading.Thread.Sleep(ServerManager.cooldownInterval);
                 }
                 else
