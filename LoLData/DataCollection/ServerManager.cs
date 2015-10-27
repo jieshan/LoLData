@@ -356,26 +356,26 @@ namespace LoLData
                 string summonerId = (string) ((JObject) fellowPlayers[i])["summonerId"];
                 if (this.ValidateNewPlayer(summonerId))
                 {
-                    lock (this.playersInQuery)
+                    lock (this.playersInQuery) lock (this.newSummoners)
                     {
-                        this.playersInQuery.Add(summonerId, 1);
-                    }
-                    lock (this.newSummoners)
-                    {
-                        if (this.newSummoners.Count == ServerManager.maxPlayersPerQuery - 1) 
+                        if(!this.playersInQuery.ContainsKey(summonerId))
                         {
-                            this.newSummoners.Add(summonerId);
-                            summonerIdsParam = String.Join(",", this.newSummoners);
-                            this.newSummoners = new List<string>();
-                        }
-                        else if (this.newSummoners.Count < ServerManager.maxPlayersPerQuery)
-                        {
-                            this.newSummoners.Add(summonerId);
-                        }
-                        else 
-                        {
-                            throw new Exception("Number of players in queue for by-entry query exceeds max limit.");
-                        }
+                            this.playersInQuery.Add(summonerId, 1);
+                            if (this.newSummoners.Count == ServerManager.maxPlayersPerQuery - 1)
+                            {
+                                this.newSummoners.Add(summonerId);
+                                summonerIdsParam = String.Join(",", this.newSummoners);
+                                this.newSummoners = new List<string>();
+                            }
+                            else if (this.newSummoners.Count < ServerManager.maxPlayersPerQuery)
+                            {
+                                this.newSummoners.Add(summonerId);
+                            }
+                            else
+                            {
+                                throw new Exception("Number of players in queue for by-entry query exceeds max limit.");
+                            }
+                        }                       
                     }
                 }
             }
