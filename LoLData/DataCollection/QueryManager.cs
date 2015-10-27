@@ -6,6 +6,7 @@ using System.Net.Http;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using System.Net;
+using System.IO;
 
 namespace LoLData.DataCollection
 {
@@ -23,11 +24,11 @@ namespace LoLData.DataCollection
 
         private Object queryLock;
 
-        private FileManager logFile;
+        private StreamWriter logFile;
 
         private int globalRetryAfter;
 
-        public QueryManager(FileManager logFile, string apiRootDomain) 
+        public QueryManager(StreamWriter logFile, string apiRootDomain) 
         {
             this.httpClient = new HttpClient();
             this.httpClient.Timeout = TimeSpan.FromMilliseconds(QueryManager.clientTimeout);
@@ -69,7 +70,7 @@ namespace LoLData.DataCollection
             {
                 this.logFile.WriteLine(String.Format("{0} {1} == Query: {2} {3}", DateTime.Now.ToLongTimeString(),
                     DateTime.Now.ToLongDateString(), statusCode, queryString));
-                this.logFile.WriterFlush();
+                this.logFile.Flush();
             }
             if (statusCode == 200)
             {

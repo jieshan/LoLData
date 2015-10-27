@@ -5,11 +5,18 @@ using System.Text;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using LoLData.DataCollection;
+using System.IO;
 
 namespace LoLData
 {
     public class ServerManager
     {
+        public enum Subject
+        {
+            Player,
+            Game
+        };
+
         private static int batchCoolDownInterval = 200000;
 
         private static int playerBatchSize = 500;
@@ -29,6 +36,8 @@ namespace LoLData
         private static string playersFilePathTemplate = "..\\..\\CachedData\\{0}players.txt";
 
         private static string gamesFilePathTemplate = "..\\..\\CachedData\\{0}games.txt";
+
+        private static string inFilePathTemplate = "..\\..\\CachedData\\{0}.txt";
 
         private static string gameType = "RANKED_SOLO_5x5";
 
@@ -63,6 +72,12 @@ namespace LoLData
 
         private Dictionary<string, int> playersDiscarded;
 
+        private Dictionary<string, int> gamesToProcess;
+
+        private Dictionary<string, int> gamesInQueue;
+
+        private Dictionary<string, int> gamesUnderProcess;
+
         private Dictionary<string, int> gamesProcessed;
 
         private List<string> newSummoners;
@@ -73,17 +88,21 @@ namespace LoLData
 
         private string apiKey;
 
-        private FileManager logFile;
+        private StreamWriter logFile;
 
-        private FileManager playersFile;
+        private StreamWriter playersFile;
 
-        private FileManager gamesFile;
+        private StreamWriter gamesFile;
 
         private Object badRequestPlayersLock;
 
         private int badRequestPlayers;
 
-        public ServerManager(string serverName, string apiKey) 
+        private string inFilePrefix;
+
+        private string currentDirectory;
+
+        public ServerManager(string serverName, string apiKey, string inFilePrefix = null, string outFilePrefix = null, string gameType = null) 
         {
             this.server = serverName;
             this.apiKey = apiKey;
@@ -93,19 +112,35 @@ namespace LoLData
             this.playersProcessed = new Dictionary<string, int>();
             this.playersInQuery = new Dictionary<string, int>();
             this.playersDiscarded = new Dictionary<string, int>();
+            this.gamesToProcess = new Dictionary<string, int>();
+            this.gamesInQueue = new Dictionary<string, int>();
+            this.gamesUnderProcess = new Dictionary<string, int>();
             this.gamesProcessed = new Dictionary<string, int>();
             this.newSummoners = new List<string>();
             this.badRequestPlayersLock = new Object();
             this.badRequestPlayers = 0;
-            this.logFile = new FileManager(String.Format(ServerManager.logFilePathTemplate, this.server));
+            if (inFilePrefix != null)
+            {
+                this.inFilePrefix = inFilePrefix;
+            }
+            if (gameType != null)
+            {
+                ServerManager.gameType = gameType;
+            }
+            this.currentDirectory = Directory.GetCurrentDirectory();
+            this.logFile = new StreamWriter(@Path.Combine(currentDirectory,
+                String.Format(ServerManager.logFilePathTemplate, outFilePrefix == null ? this.server : outFilePrefix)));
             lock (this.logFile)
             {
                 this.logFile.WriteLine(String.Format("{0} {1} ======== Log file created.", DateTime.Now.ToLongTimeString(),
                     DateTime.Now.ToLongDateString()));
             }
-            this.playersFile = new FileManager(String.Format(ServerManager.playersFilePathTemplate, this.server));
-            this.gamesFile = new FileManager(String.Format(ServerManager.gamesFilePathTemplate, this.server));
-            this.queryManager = new QueryManager(this.logFile, String.Format(ServerManager.serverRootDomainTemplate, this.server));
+            this.playersFile = new StreamWriter(@Path.Combine(currentDirectory,
+                String.Format(ServerManager.playersFilePathTemplate, outFilePrefix == null ? this.server : outFilePrefix)));
+            this.gamesFile = new StreamWriter(@Path.Combine(currentDirectory,
+                String.Format(ServerManager.gamesFilePathTemplate, outFilePrefix == null ? this.server : outFilePrefix)));
+            this.queryManager = new QueryManager(this.logFile, String.Format(ServerManager.serverRootDomainTemplate, 
+                outFilePrefix == null ? this.server : outFilePrefix));
         }
 
         public async void InitiateNewSeedScan()
@@ -147,16 +182,51 @@ namespace LoLData
                 {
                     lock (this.logFile)
                     {
-                        this.logFile.WriterLogError(e.ToString());
-                        this.logFile.WriterFlush();
+                        FileHelper.WriterLogError(this.logFile, e.ToString());
+                        this.logFile.Flush();
                     }
                 }
                 finally 
                 {
-                    this.logFile.WriterFlush();
-                    this.playersFile.WriterFlush();
+                    this.logFile.Flush();
+                    this.playersFile.Flush();
                 }
             }          
+        }
+
+        public void loadDataFromFile(Subject subject = Subject.Player) 
+        {
+            StreamReader reader = new StreamReader(@Path.Combine(this.currentDirectory,
+                String.Format(ServerManager.inFilePathTemplate, this.inFilePrefix)));
+            string line;
+            int count = 0;
+            while ((line = reader.ReadLine()) != null)
+            {
+                string[] fields = line.Split(',');
+                switch (subject)
+                {
+                    case Subject.Game:
+                        lock (this.gamesToProcess) 
+                        {
+                            this.gamesToProcess.Add(fields[0], 1);
+                        }
+                        break;
+                    case Subject.Player:
+                    default:
+                        lock (this.playersToProcess)
+                        {
+                            this.playersToProcess.Add(fields[0], 1);
+                        }
+                        break;
+                }
+                count ++;
+                if (count % 2000 == 0)
+                {
+                    System.Diagnostics.Debug.WriteLine(String.Format("===== {0} entries of {1} have been loaded.",
+                        count, subject == Subject.Game ? "games" : subject == Subject.Player ? "players" : "records"));
+                }
+            }
+            reader.Close();
         }
 
         public bool ProcessAllPlayers(int remainingWaits = -1) 
@@ -241,14 +311,14 @@ namespace LoLData
         public int GetTotalGamesCount()
         {
             // Only an approximate, yielding access to data processing work
-            return this.gamesProcessed.Count;
+            return this.gamesToProcess.Count;
         }
 
         public void CloseAllFiles() 
         {
-            this.logFile.WriterClose();
-            this.playersFile.WriterClose();
-            this.gamesFile.WriterClose();
+            this.logFile.Close();
+            this.playersFile.Close();
+            this.gamesFile.Close();
         }
 
         private async void ProcessNextPlayer() 
@@ -294,8 +364,8 @@ namespace LoLData
                             lock (this.logFile)
                             {
                                 var flattenedAe = ae.Flatten();
-                                this.logFile.WriterLogError(ae.ToString());
-                                this.logFile.WriterFlush();
+                                FileHelper.WriterLogError(this.logFile, ae.ToString());
+                                this.logFile.Flush();
                             }
                         }
                     }
@@ -319,8 +389,8 @@ namespace LoLData
             {
                 lock (this.logFile)
                 {
-                    this.logFile.WriterLogError(e.ToString());
-                    this.logFile.WriterFlush();
+                    FileHelper.WriterLogError(this.logFile, e.ToString());
+                    this.logFile.Flush();
                 }
             }
             lock (ServerManager.currentThreadsLock)
@@ -391,8 +461,8 @@ namespace LoLData
                     lock (this.logFile)
                     {
                         var flattenedAe = ae.Flatten();
-                        this.logFile.WriterLogError(ae.ToString());
-                        this.logFile.WriterFlush();
+                        FileHelper.WriterLogError(this.logFile, ae.ToString());
+                        this.logFile.Flush();
                     }
                 }
             }
@@ -438,13 +508,13 @@ namespace LoLData
                                         lock (this.playersFile)
                                         {
                                             this.playersFile.WriteLine(summonerId);
-                                            this.playersFile.WriterFlush();
+                                            this.playersFile.Flush();
                                         }
                                         lock (this.logFile)
                                         {
                                             this.logFile.WriteLine(String.Format("{0} {1} ======== Player Qualified for Process: {2} ({3})", DateTime.Now.ToLongTimeString(),
                                                 DateTime.Now.ToLongDateString(), summonerId, tier));
-                                            this.logFile.WriterFlush();
+                                            this.logFile.Flush();
                                         }
                                     }
                                     else
@@ -461,7 +531,7 @@ namespace LoLData
                                         {
                                             this.logFile.WriteLine(String.Format("{0} {1} ======== Player Disqualified for Process: {2} ({3})", DateTime.Now.ToLongTimeString(),
                                                 DateTime.Now.ToLongDateString(), summonerId, tier));
-                                            this.logFile.WriterFlush();
+                                            this.logFile.Flush();
                                         }
                                     }
                                     break;
@@ -482,8 +552,8 @@ namespace LoLData
             {
                 lock (this.logFile)
                 {
-                    this.logFile.WriterLogError(e.ToString());
-                    this.logFile.WriterFlush();
+                    FileHelper.WriterLogError(this.logFile, e.ToString());
+                    this.logFile.Flush();
                 }
             }
             lock (ServerManager.currentThreadsLock)
@@ -496,24 +566,24 @@ namespace LoLData
         {
             // TODO: Game analysis implementation
             string gameId = null;
-            lock (this.gamesProcessed)
+            lock (this.gamesToProcess)
             {
                 gameId = (string)game["gameId"];
-                if (!this.gamesProcessed.ContainsKey(gameId))
+                if (!this.gamesToProcess.ContainsKey(gameId))
                 {
-                    this.gamesProcessed.Add((string)game["gameId"], 1);
+                    this.gamesToProcess.Add((string)game["gameId"], 1);
                 }               
             }
             lock (this.gamesFile)
             {
                 this.gamesFile.WriteLine(gameId);
-                this.gamesFile.WriterFlush();
+                this.gamesFile.Flush();
             }
             lock (this.logFile)
             {
                 this.logFile.WriteLine(String.Format("{0} {1} ======== Game Registered {2}", DateTime.Now.ToLongTimeString(),
                     DateTime.Now.ToLongDateString(), gameId));
-                this.logFile.WriterFlush();
+                this.logFile.Flush();
             }
         }
 
@@ -539,8 +609,8 @@ namespace LoLData
                     lock (this.logFile)
                     {
                         var flattenedAe = ae.Flatten();
-                        this.logFile.WriterLogError(ae.ToString());
-                        this.logFile.WriterFlush();
+                        FileHelper.WriterLogError(this.logFile, ae.ToString());
+                        this.logFile.Flush();
                     }
                 }
             }
