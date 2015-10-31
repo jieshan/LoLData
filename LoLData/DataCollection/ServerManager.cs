@@ -31,6 +31,10 @@ namespace LoLData
 
         private static int maxPlayersPerQuery = 10;
 
+        private static string blueTeam = "100";
+
+        private static string purpleTeam = "200";
+
         private static string logFilePathTemplate = "..\\..\\CachedData\\{0}log.txt";
 
         private static string playersFilePathTemplate = "..\\..\\CachedData\\{0}players.txt";
@@ -55,6 +59,9 @@ namespace LoLData
 
         private static string summonerQueryTemplate = "https://{0}.api.pvp.net/api/lol/{1}/v2.5/league/" + 
             "by-summoner/{2}/entry?api_key={3}";
+
+        private static string matchesQueryTemplate = "https://{0}.api.pvp.net/api/lol/{1}/v2.2/match/" +
+            "{2}?api_key={3}";
 
         public static Object currentThreadsLock = new Object();
 
@@ -231,7 +238,11 @@ namespace LoLData
                     case Subject.Game:
                         lock (this.gamesToProcess) 
                         {
-                            this.gamesToProcess.Add(fields[0], 1);
+                            if (!this.gamesToProcess.ContainsKey(fields[0]))
+                            {
+                                this.gamesToProcess.Add(fields[0], 1);
+                                count++;
+                            }
                         }
                         break;
                     case Subject.Player:
@@ -239,10 +250,10 @@ namespace LoLData
                         lock (this.playersToProcess)
                         {
                             this.playersToProcess.Add(fields[0], 1);
+                            count++;
                         }
                         break;
-                }
-                count ++;
+                }           
                 if (count % 2000 == 0)
                 {
                     System.Diagnostics.Debug.WriteLine(String.Format("===== {0} entries of {1} have been loaded.",
@@ -252,7 +263,7 @@ namespace LoLData
             reader.Close();
         }
 
-        public bool ProcessAll(Subject subject = Subject.Player, bool recursiveSearch = true, int remainingWaits = -1) 
+        public bool ProcessAll(Subject subject = Subject.Player, bool playerRecursiveSearch = true, int remainingWaits = -1) 
         {
             Dictionary<string, Dictionary<string, int>> journal = null;
             switch (subject)
@@ -283,18 +294,7 @@ namespace LoLData
                     }
                 }               
                 this.VerifyThreadsCapacity();
-                if (subject == Subject.Player)
-                {
-                    this.ProcessNextPlayer(recursiveSearch);
-                }
-                else if (subject == Subject.Game)
-                {
-                    // TODO
-                }
-                else
-                {
-                    ServerManager.releaseOneThread();
-                }
+                this.ProcessNext(subject, playerRecursiveSearch);
                 
                 remainingWaits = ServerManager.maxProcessQueueWaits;
             }
@@ -313,7 +313,7 @@ namespace LoLData
                 if (toProcess > 0)
                 {
                     System.Diagnostics.Debug.WriteLine(String.Format("===== Batch completed. Breaking for {0} milliseconds.",
-                   ServerManager.batchCoolDownInterval));
+                        ServerManager.batchCoolDownInterval));
                     System.Threading.Thread.Sleep(ServerManager.batchCoolDownInterval);
                     this.GetNextBatch(journal, subject);
                 }
@@ -325,17 +325,17 @@ namespace LoLData
                     }
                     else if (subject == Subject.Game)
                     {
-                        // TODO
-                    }
-                    else
-                    {
+                        if (this.playersToProcess.Count > 0 || this.playersInQueue.Count > 0 || this.playersUnderProcess.Count > 0) 
+                        {
+                            System.Threading.Thread.Sleep(ServerManager.batchCoolDownInterval);
+                        }
                     }
                 }
             }
 
             if (journal["UnderProcess"].Count == 0 && journal["InQueue"].Count == 0 && journal["ToProcess"].Count == 0
-                && subject == Subject.Game ? this.playersToProcess.Count == 0 && this.playersInQueue.Count == 0 
-                && this.playersUnderProcess.Count == 0 : true)
+                && (subject == Subject.Game ? this.playersToProcess.Count == 0 && this.playersInQueue.Count == 0 
+                && this.playersUnderProcess.Count == 0 : true))
             {
                 System.Threading.Thread.Sleep(ServerManager.cooldownInterval);
                 remainingWaits -= 1;
@@ -345,6 +345,7 @@ namespace LoLData
             else if (journal["UnderProcess"].Count > 0) 
             {
                 System.Threading.Thread.Sleep(ServerManager.cooldownInterval);
+                remainingWaits = ServerManager.maxProcessQueueWaits;
             }
             if (remainingWaits == 0)
             {
@@ -354,7 +355,7 @@ namespace LoLData
                 System.Diagnostics.Debug.WriteLine(this.GetTotalGamesCount());
                 return true;
             }
-            return this.ProcessAll(subject, recursiveSearch, remainingWaits);
+            return this.ProcessAll(subject, playerRecursiveSearch, remainingWaits);
         }
 
         public int GetTotalValidPlayersCount()
@@ -382,69 +383,124 @@ namespace LoLData
             this.gamesFile.Close();
         }
 
-        private async void ProcessNextPlayer(bool recursiveSearch) 
+        private async void ProcessNext(Subject subject, bool recursiveSearch) 
         {
-            string playerId = null;
-            lock (this.playersInQueue) lock (this.playersUnderProcess)
+            Dictionary<string, Dictionary<string, int>> journal = null;
+            switch (subject)
             {
-                if (this.playersInQueue.Count > 0)
+                case Subject.Game:
+                    journal = this.gamesJournal;
+                    break;
+                case Subject.Player:
+                default:
+                    journal = this.playersJournal;
+                    break;
+            }
+            string id = null;
+            lock (journal["InQueue"]) lock (journal["UnderProcess"])
+            {
+                if (journal["InQueue"].Count > 0)
                 {
-                    playerId = this.playersInQueue.Keys.ElementAt(0);
-                    this.playersInQueue.Remove(playerId);
-                    this.playersUnderProcess.Add(playerId, 1);
+                    id = journal["InQueue"].Keys.ElementAt(0);
+                    journal["InQueue"].Remove(id);
+                    journal["UnderProcess"].Add(id, 1);
                 }
                 else 
                 {
                     ServerManager.releaseOneThread();
                     return;
                 }               
-            }
-            string queryString = String.Format(ServerManager.gamesQueryTemplate, this.server.ToLower(), 
-                this.server.ToLower(), playerId, this.apiKey);            
+            }            
             try
             {
                 this.VerifyThreadsCapacity();
-                JObject gamesResponse = await this.queryManager.MakeQuery(queryString);
-                if (gamesResponse != null)
+                string queryString = "";
+                switch (subject)
                 {
-                    JArray games = (JArray)gamesResponse["games"];
-
-                    for (int i = 0; i < games.Count; i++)
-                    {
-                        JObject game = (JObject)games.ElementAt(i);
-                        try
+                    case Subject.Game:
+                        queryString = String.Format(ServerManager.matchesQueryTemplate, this.server.ToLower(),
+                            this.server.ToLower(), id, this.apiKey);
+                        JObject matchResponse = await this.queryManager.MakeQuery(queryString);
+                        if (matchResponse != null)
                         {
-                            this.VerifyThreadsCapacity();
-                            Task.Run(() => ProcessGame(game, recursiveSearch));
-                        }
-                        catch (AggregateException ae)
-                        {
-                            lock (this.logFile)
+                            this.RegisterMatch(matchResponse);
+                    
+                            lock (journal["Processed"])
                             {
-                                var flattenedAe = ae.Flatten();
-                                FileHelper.WriterLogError(this.logFile, ae.ToString());
-                                this.logFile.Flush();
+                                journal["Processed"].Add(id, 1);
+                                System.Diagnostics.Debug.WriteLine(String.Format("{0} {1} ==== Game {2} processed.", DateTime.Now.ToShortDateString(),
+                                    DateTime.Now.ToLongTimeString(), id));
+                                System.Diagnostics.Debug.WriteLine(String.Format("{0} {1} ==== *Valid: {2} - Done: {3}. InProgress: {4}. InQueue: {5}. " +
+                                    "ToDo: {6}.", DateTime.Now.ToShortDateString(), DateTime.Now.ToLongTimeString(), this.GetTotalGamesCount(), 
+                                    this.gamesProcessed.Count, this.gamesUnderProcess.Count, this.gamesInQueue.Count, this.gamesToProcess.Count));
                             }
                         }
-                    }
-                    lock (this.playersProcessed)
-                    {
-                        this.playersProcessed.Add(playerId, 1);
-                        System.Diagnostics.Debug.WriteLine(String.Format("{0} {1} ==== Player {2} processed.", DateTime.Now.ToShortDateString(),
-                            DateTime.Now.ToLongTimeString(), playerId));
-                        System.Diagnostics.Debug.WriteLine(String.Format("{0} {1} ==== *Valid: {2} - Done: {3}. InProgress: {4}. InQueue: {5}. " +
-                            "ToDo: {6}. *Invalid: {7}. *InQuery: {8}. *BadRequests: {9}.", DateTime.Now.ToShortDateString(), DateTime.Now.ToLongTimeString(),
-                            this.GetTotalValidPlayersCount(), this.playersProcessed.Count, this.playersUnderProcess.Count, this.playersInQueue.Count, 
-                            this.playersToProcess.Count, this.playersDiscarded.Count, this.playersInQuery.Count, this.badRequestPlayers));
-                    } 
-                }
-                lock (this.playersUnderProcess) 
-                {
-                    this.playersUnderProcess.Remove(playerId);
-                }              
+                        lock (journal["UnderProcess"])
+                        {
+                            journal["UnderProcess"].Remove(id);
+                        }
+                        break;
+                    case Subject.Player:
+                    default:
+                        queryString = String.Format(ServerManager.gamesQueryTemplate, this.server.ToLower(),
+                            this.server.ToLower(), id, this.apiKey);
+                        JObject gamesResponse = await this.queryManager.MakeQuery(queryString);
+                        if (gamesResponse != null)
+                        {
+                            JArray games = (JArray)gamesResponse["games"];
+
+                            for (int i = 0; i < games.Count; i++)
+                            {
+                                JObject game = (JObject)games.ElementAt(i);
+                                try
+                                {
+                                    this.VerifyThreadsCapacity();
+                                    Task.Run(() => ProcessGame(game, recursiveSearch));
+                                }
+                                catch (AggregateException ae)
+                                {
+                                    lock (this.logFile)
+                                    {
+                                        var flattenedAe = ae.Flatten();
+                                        FileHelper.WriterLogError(this.logFile, ae.ToString());
+                                        this.logFile.Flush();
+                                    }
+                                }
+                            }
+                            lock (journal["Processed"])
+                            {
+                                journal["Processed"].Add(id, 1);
+                                System.Diagnostics.Debug.WriteLine(String.Format("{0} {1} ==== Player {2} processed.", DateTime.Now.ToShortDateString(),
+                                    DateTime.Now.ToLongTimeString(), id));
+                                System.Diagnostics.Debug.WriteLine(String.Format("{0} {1} ==== *Valid: {2} - Done: {3}. InProgress: {4}. InQueue: {5}. " +
+                                    "ToDo: {6}. *Invalid: {7}. *InQuery: {8}. *BadRequests: {9}.", DateTime.Now.ToShortDateString(), DateTime.Now.ToLongTimeString(),
+                                    this.GetTotalValidPlayersCount(), this.playersProcessed.Count, this.playersUnderProcess.Count, this.playersInQueue.Count, 
+                                    this.playersToProcess.Count, this.playersDiscarded.Count, this.playersInQuery.Count, this.badRequestPlayers));
+                            } 
+                        }
+                        lock (journal["UnderProcess"])
+                        {
+                            journal["UnderProcess"].Remove(id);
+                        } 
+                        break;
+                }             
             }
             catch (Exception e)
             {
+                lock (journal["Processed"])
+                {
+                    if (!journal["Processed"].ContainsKey(id))
+                    {
+                        journal["Processed"].Add(id, 1);
+                    }
+                }
+                lock (journal["UnderProcess"])
+                {
+                    if (journal["UnderProcess"].ContainsKey(id))
+                    {
+                        journal["UnderProcess"].Remove(id);
+                    }                    
+                } 
                 lock (this.logFile)
                 {
                     FileHelper.WriterLogError(this.logFile, e.ToString());
@@ -452,21 +508,24 @@ namespace LoLData
                 }
             }
             ServerManager.releaseOneThread();
-            int playerCount;
-            playerCount = this.playersProcessed.Count;
-            if (playerCount % ServerManager.gamesProgressReport == 0)
+            if (subject == ServerManager.Subject.Player)
             {
-                System.Diagnostics.Debug.WriteLine(String.Format("======== {0} server now has processed {1} players.", 
-                    this.server, playerCount));
-                System.Diagnostics.Debug.WriteLine(String.Format("======== {0} server now has {1} games on record.",
-                    this.server, this.GetTotalGamesCount()));
+                int playerCount;
+                playerCount = this.playersProcessed.Count;
+                if (playerCount % ServerManager.gamesProgressReport == 0)
+                {
+                    System.Diagnostics.Debug.WriteLine(String.Format("======== {0} server now has processed {1} players.",
+                        this.server, playerCount));
+                    System.Diagnostics.Debug.WriteLine(String.Format("======== {0} server now has {1} games on record.",
+                        this.server, this.GetTotalGamesCount()));
+                }
             }
             return;
         }
 
         private void ProcessGame(JObject game, bool recursiveSearch)
         {
-            if (((string) game["subType"]).Equals(ServerManager.gameType))
+            if (((string)game["subType"]).Equals(ServerManager.gameType))
             {
                 RegisterGame(game);
             }
@@ -475,7 +534,7 @@ namespace LoLData
                 ServerManager.releaseOneThread();
                 return;
             }
-            JArray fellowPlayers = (JArray) game["fellowPlayers"];
+            JArray fellowPlayers = (JArray)game["fellowPlayers"];
             if(fellowPlayers == null)
             {
                 ServerManager.releaseOneThread();
@@ -484,7 +543,7 @@ namespace LoLData
             string summonerIdsParam = null;
             for (int i = 0; i < fellowPlayers.Count; i++ )
             {
-                string summonerId = (string) ((JObject) fellowPlayers[i])["summonerId"];
+                string summonerId = (string) ((JObject)fellowPlayers[i])["summonerId"];
                 if (this.ValidateNewPlayer(summonerId))
                 {
                     lock (this.playersInQuery) lock (this.newSummoners)
@@ -653,12 +712,12 @@ namespace LoLData
                         break;
                     case "RANKED_SOLO_5x5":
                     default:
-                        this.gamesToProcess.Add((string)game["gameId"], 1);
+                        this.gamesToProcess.Add(gameId, 1);
                         lock (this.gamesFile)
                         {
                             this.gamesFile.WriteLine(gameId);
                             this.gamesFile.Flush();
-                        }
+                        }                    
                         break;
                 }         
             }               
@@ -666,6 +725,78 @@ namespace LoLData
             {
                 this.logFile.WriteLine(String.Format("{0} {1} ======== Game Registered {2}", DateTime.Now.ToLongTimeString(),
                     DateTime.Now.ToLongDateString(), gameId));
+                this.logFile.Flush();
+            }
+        }
+
+        private void RegisterMatch(JObject match)
+        {
+            // TODO: Match analysis implementation
+            string matchId = null;
+            matchId = (string)match["matchId"];
+            switch (ServerManager.gameType)
+            {
+                case "RANKED_SOLO_5x5":
+                default:
+                    string blueChampions = "";
+                    string purpleChampions = "";
+                    string blueTeamStats = "";
+                    string purpleTeamStats = "";
+                    string blueTeamWin = "";
+                    string championBans = "";
+                    long time = (long)match["matchDuration"];
+                    JArray players = (JArray)match["participants"];
+                    for (int i = 0; i < players.Count; i++)
+                    {
+                        JObject player = (JObject)players[i];
+                        string championId = (string)player["championId"];
+                        string teamId = (string)player["teamId"];
+                        if (teamId.Equals(ServerManager.blueTeam))
+                        {
+                            blueChampions += blueChampions.Length > 0 ? "," + championId : championId;
+                        }
+                        else if (teamId.Equals(ServerManager.purpleTeam))
+                        {
+                            purpleChampions += purpleChampions.Length > 0 ? "," + championId : championId;
+                        }
+                    }
+                    JArray teams = (JArray)match["teams"];
+                    for (int i = 0; i < teams.Count; i++)
+                    {
+                        JObject team = (JObject)teams[i];
+                        string baronKills = (string)team["baronKills"];
+                        string dragonKills = (string)team["dragonKills"];
+                        string teamId = (string)team["teamId"];
+                        string winner = (string)team["winner"];
+                        if (teamId.Equals(ServerManager.blueTeam))
+                        {
+                            blueTeamStats += dragonKills + "," + baronKills;
+                            blueTeamWin = winner;
+                        }
+                        else if (teamId.Equals(ServerManager.purpleTeam))
+                        {
+                            purpleTeamStats += dragonKills + "," + baronKills;
+                        }
+                        JArray bans = (JArray)team["bans"];
+                        for (int j = 0; j < bans.Count; j++)
+                        {
+                            championBans += championBans.Length > 0 ? "," + (string)bans[j]["championId"] 
+                                : (string)bans[j]["championId"];
+                        }
+                    }
+                    lock (this.gamesFile)
+                    {
+                        // TODO: Add data validation if needed
+                        this.gamesFile.WriteLine(String.Format("{0},{1},{2},{3},{4},{5},{6},{7}", matchId, time, blueTeamWin,
+                            blueChampions, purpleChampions, blueTeamStats, purpleTeamStats, championBans));
+                        this.gamesFile.Flush();
+                    }
+                    break;
+            }
+            lock (this.logFile)
+            {
+                this.logFile.WriteLine(String.Format("{0} {1} ======== Match Registered {2}", DateTime.Now.ToLongTimeString(),
+                    DateTime.Now.ToLongDateString(), matchId));
                 this.logFile.Flush();
             }
         }

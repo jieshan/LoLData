@@ -17,9 +17,9 @@ namespace LoLData.DataCollection
 
         public static string gameType = "ONEFORALL_5x5";
 
-        public static string inFilePrefixTemplate = "{0}players";
+        public static string inFilePrefixTemplate = "{0}games";
 
-        public static string outFilePrefixTemplate = "{0}OneForAll";
+        public static string outFilePrefixTemplate = "{0}SoloRanked";
 
         public static void Main() 
         {
@@ -47,7 +47,10 @@ namespace LoLData.DataCollection
                     // DataCollection.SeedScanSuite(serverManager);
 
                     // Suite 2: Scan a type of games given existing players from a file
-                    DataCollection.ScanGamesFromPlayersSuite(serverManager);
+                    // DataCollection.ScanGamesFromPlayersSuite(serverManager);
+
+                    // Suite 3: Collecting detailed game data from existing list of gameIds
+                    DataCollection.ScanGamesFromGameIdsSuite(serverManager);
                 }
                 finally
                 {
@@ -71,6 +74,12 @@ namespace LoLData.DataCollection
         {
             serverManager.loadDataFromFile();
             serverManager.ProcessAll(ServerManager.Subject.Player, false);
+        }
+
+        public static void ScanGamesFromGameIdsSuite(ServerManager serverManager)
+        {
+            serverManager.loadDataFromFile(ServerManager.Subject.Game);
+            serverManager.ProcessAll(ServerManager.Subject.Game);
         }
     }
 }
