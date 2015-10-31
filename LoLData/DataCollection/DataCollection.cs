@@ -64,12 +64,13 @@ namespace LoLData.DataCollection
         public static void SeedScanSuite(ServerManager serverManager)
         {
             serverManager.InitiateNewSeedScan();
-            serverManager.ProcessAllPlayers();
+            serverManager.ProcessAll();
         }
 
         public static void ScanGamesFromPlayersSuite(ServerManager serverManager) 
         {
             serverManager.loadDataFromFile();
+            serverManager.ProcessAll(ServerManager.Subject.Player, false);
         }
     }
 }

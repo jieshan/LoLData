@@ -14,8 +14,6 @@ namespace LoLData.DataCollection
     {
         private static int clientTimeout = 600000;
 
-        private static int rateLimitBuffer = 1210;
-
         private static int maxQueryRetry = 3;
 
         private static string retryHeader = "Retry-After";
@@ -26,7 +24,9 @@ namespace LoLData.DataCollection
 
         private StreamWriter logFile;
 
-        private int globalRetryAfter;
+        public static int rateLimitBuffer = 1210;
+
+        public int globalRetryAfter;
 
         public QueryManager(StreamWriter logFile, string apiRootDomain) 
         {
@@ -34,7 +34,7 @@ namespace LoLData.DataCollection
             this.httpClient.Timeout = TimeSpan.FromMilliseconds(QueryManager.clientTimeout);
             this.queryLock = new Object();
             this.logFile = logFile;
-            this.globalRetryAfter = 0;
+            this.globalRetryAfter = QueryManager.rateLimitBuffer;
         }
 
         public async Task<JObject> MakeQuery(string queryString, int retry = 0) 
@@ -48,9 +48,7 @@ namespace LoLData.DataCollection
 
             var httpResponse = await QueryManager.ExecuteQuery(this.httpClient, queryString);
             int statusCode = (int) httpResponse.StatusCode;
-            lock(ServerManager.currentThreadsLock){
-                ServerManager.currentWebCalls --;
-            }
+            ServerManager.releaseOneThread();
             System.Diagnostics.Debug.WriteLine(String.Format("{0} ==== Query: {1} {2}", DateTime.Now.ToLongTimeString(),
                 statusCode, queryString));
             if (statusCode == 429)
